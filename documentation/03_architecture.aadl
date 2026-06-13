@@ -1,0 +1,664 @@
+--------------------------------------------------------------------------------
+-- Memory-Safe C++ Library v1 -- Architecture model (AADL v2 / SAE AS5506C)
+--
+-- Derived from: 00-final-cpp-mem-safe-prd.md
+-- Companion to:  00-final-cpp-mem-safe-test-plan.md
+--
+-- PURPOSE
+--   A faithful architectural rendering of the header-only memory-safety library
+--   described in the PRD, expressed in textual AADL for analysis in OSATE.
+--
+-- C++  ->  AADL MAPPING LEGEND
+--   C++ type (e.g. Owner<T>)        ->  data component type + .impl
+--   C++ method (e.g. borrow())      ->  subprogram, exposed on the owning data
+--                                       type via `provides subprogram access`
+--                                       (AADL Data Modeling Annex)
+--   data members / fields           ->  data subcomponents in the .impl
+--   template parameter T            ->  placeholder `data Element` (see note)
+--   [[nodiscard]], noexcept move,   ->  custom properties in MemSafe_Properties
+--     atomic generation, lock-free
+--   vertical slices 0..9            ->  `abstract` components
+--   Slice 0 dependency mandate      ->  subprogram-access connections
+--   MEMSAFE_RELEASE_CHECKS=0/1      ->  modes (Release_NoChecks / Debug_Checks)
+--   concurrency test scenario       ->  deployment `system` (Concurrent_Demo)
+--
+-- ASSUMPTIONS / SIMPLIFICATIONS
+--   * AADL data types are not generic; the C++ template parameter T is modeled
+--     by the placeholder type `Element`. (AADL prototypes could formalize this
+--     further; omitted here for portability across tools.)
+--   * `std::source_location` carried by memsafe::violation is modeled as a
+--     String parameter on the On_Violation subprogram.
+--   * `Ref`/`MutRef` hold non-owning pointers; this is modeled by their Deref
+--     subprogram requiring data access to Element rather than by an owned field.
+--   * Bounded SlotMap capacity is fixed at 64 for illustration (Slot_Capacity).
+--------------------------------------------------------------------------------
+
+property set MemSafe_Properties is
+
+  -- Ownership / borrowing invariants ------------------------------------------
+  Move_Noexcept            : aadlboolean applies to (data);
+  Nodiscard                : aadlboolean applies to (data, subprogram);
+  Copyable                 : aadlboolean applies to (data);
+  Owns_Heap_Allocation     : aadlboolean applies to (data);
+  RAII_Scoped              : aadlboolean applies to (data, abstract);
+  Borrow_Counted           : aadlboolean applies to (data);
+  Co_Await_Prohibited      : aadlboolean applies to (data);
+
+  -- Generational handles ------------------------------------------------------
+  Generation_Checked       : aadlboolean applies to (data, subprogram);
+  Atomic_Generation        : aadlboolean applies to (data, subprogram);
+  Bounded_Capacity         : aadlboolean applies to (data);
+  Lock_Free                : aadlboolean applies to (data);
+  Slot_Capacity            : aadlinteger applies to (data);
+
+  -- Concurrency ---------------------------------------------------------------
+  Thread_Safe              : aadlboolean applies to (data, thread, abstract);
+  Synchronization_Protocol : enumeration (Unsynchronized, Atomic_Refcount,
+                                           Treiber_Stack, Mutex_Guarded)
+                             applies to (data, virtual bus);
+
+  -- Build / configuration -----------------------------------------------------
+  Header_Only              : aadlboolean applies to (system, abstract);
+  Release_Checks           : aadlboolean applies to (system, abstract);
+  Cxx_Standard             : enumeration (Cxx17, Cxx20)
+                             applies to (system, abstract);
+  Violation_Policy         : enumeration (Abort, Throw, Handler)
+                             applies to (system, abstract, subprogram);
+  Backend                  : enumeration (No_Backend, Clang, GCC, MSVC,
+                                           Rusty_Cpp, CHERI)
+                             applies to (system, abstract);
+
+  -- Roadmap traceability ------------------------------------------------------
+  Slice_Id                 : aadlinteger
+                             applies to (abstract, system, data, subprogram);
+
+end MemSafe_Properties;
+
+
+package MemSafe
+public
+  with Base_Types;
+  with Data_Model;
+  with MemSafe_Properties;
+
+  ----------------------------------------------------------------------------
+  -- Placeholder for the C++ template parameter T (the user payload type).
+  ----------------------------------------------------------------------------
+  data Element
+    properties
+      Data_Model::Data_Representation => Struct;
+  end Element;
+
+  ----------------------------------------------------------------------------
+  -- SUBPROGRAMS (C++ member functions / free operations)
+  ----------------------------------------------------------------------------
+
+  -- Slice 0: violation-policy hook (Abort / Throw / Handler).
+  subprogram On_Violation
+    features
+      violation_kind : in parameter Base_Types::Integer;
+      diagnostic     : in parameter Base_Types::String;  -- + std::source_location
+    properties
+      MemSafe_Properties::Slice_Id => 0;
+      MemSafe_Properties::Violation_Policy => Abort;
+  end On_Violation;
+
+  -- Slice 0: MEMSAFE_BACKEND_* autodetection.
+  subprogram Backend_Detect
+    features
+      backend_id : out parameter Base_Types::Integer;
+    properties
+      MemSafe_Properties::Slice_Id => 0;
+  end Backend_Detect;
+
+  -- operator* / operator-> : hands back access to the referenced element.
+  subprogram Deref
+    features
+      element : requires data access Element;
+  end Deref;
+
+  subprogram Has_Value
+    features
+      present : out parameter Base_Types::Boolean;
+  end Has_Value;
+
+  -- Owner::borrow() -> Ref<T>  (exclusivity checked at the owner's counter).
+  subprogram Borrow
+    features
+      owner_self : requires data access Owner;
+      result     : out parameter Ref;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Slice_Id => 1;
+  end Borrow;
+
+  -- Owner::borrow_mut() -> MutRef<T>  (violates exclusivity if any borrow exists).
+  subprogram Borrow_Mut
+    features
+      owner_self : requires data access Owner;
+      result     : out parameter MutRef;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Slice_Id => 1;
+  end Borrow_Mut;
+
+  -- SyncOwner::borrow() -> SyncRef<T>  (atomic borrow counters).
+  subprogram Borrow_Sync
+    features
+      owner_self : requires data access SyncOwner;
+      result     : out parameter SyncRef;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Thread_Safe => true;
+      MemSafe_Properties::Slice_Id => 4;
+  end Borrow_Sync;
+
+  subprogram Borrow_Mut_Sync
+    features
+      owner_self : requires data access SyncOwner;
+      result     : out parameter SyncMutRef;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Thread_Safe => true;
+      MemSafe_Properties::Slice_Id => 4;
+  end Borrow_Mut_Sync;
+
+  -- SlotMap::allocate(args...) -> Handle<T>  (CAS pop from Treiber-stack free list).
+  subprogram Allocate
+    features
+      map_self : requires data access SlotMap;
+      result   : out parameter Handle;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Slice_Id => 2;
+  end Allocate;
+
+  -- SlotMap::deallocate(Handle): push index, atomically bump slot generation.
+  subprogram Deallocate
+    features
+      map_self : requires data access SlotMap;
+      h        : in parameter Handle;
+    properties
+      MemSafe_Properties::Atomic_Generation => true;
+      MemSafe_Properties::Slice_Id => 2;
+  end Deallocate;
+
+  subprogram Get_Slot
+    features
+      map_self : requires data access SlotMap;
+      h        : in parameter Handle;
+      element  : requires data access Element;
+    properties
+      MemSafe_Properties::Generation_Checked => true;
+      MemSafe_Properties::Slice_Id => 2;
+  end Get_Slot;
+
+  subprogram Capacity
+    features
+      map_self : requires data access SlotMap;
+      n        : out parameter Base_Types::Integer;
+  end Capacity;
+
+  subprogram Size
+    features
+      map_self : requires data access SlotMap;
+      n        : out parameter Base_Types::Integer;
+  end Size;
+
+  -- Handle::operator* : single atomic generation load + compare;
+  -- mismatch -> On_Violation. The flow path is the use-after-free detector.
+  subprogram Deref_Handle
+    features
+      h           : in parameter Handle;
+      element_out : requires data access Element;
+      valid       : out parameter Base_Types::Boolean;
+    flows
+      generation_check : flow path h -> valid;
+    properties
+      MemSafe_Properties::Generation_Checked => true;
+      MemSafe_Properties::Atomic_Generation => true;
+      MemSafe_Properties::Slice_Id => 2;
+  end Deref_Handle;
+
+  subprogram Is_Valid
+    features
+      h     : in parameter Handle;
+      valid : out parameter Base_Types::Boolean;
+    properties
+      MemSafe_Properties::Generation_Checked => true;
+  end Is_Valid;
+
+  -- Slot generation bump on free (atomic increment).
+  subprogram Increment_Generation
+    features
+      slot_self : requires data access Slot;
+    properties
+      MemSafe_Properties::Atomic_Generation => true;
+      MemSafe_Properties::Slice_Id => 2;
+  end Increment_Generation;
+
+  -- Mutex::lock() -> MutRef<T> (unlock decrements borrow counter).
+  subprogram Lock
+    features
+      mutex_self : requires data access Mutex;
+      guard      : out parameter MutRef;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Slice_Id => 5;
+  end Lock;
+
+  -- Scope::create(args...) -> raw T* (v1: sanitizer-only UAF oracle).
+  subprogram Create_In_Scope
+    features
+      scope_self : requires data access Scope;
+      raw_ptr    : out parameter Base_Types::Integer;  -- raw T* (unchecked in v1)
+    properties
+      MemSafe_Properties::Slice_Id => 3;
+  end Create_In_Scope;
+
+  ----------------------------------------------------------------------------
+  -- OWNERSHIP TYPES (Slice 1)
+  ----------------------------------------------------------------------------
+
+  -- Ref<T>: immutable, copyable, [[nodiscard]] borrow; no hold across co_await.
+  data Ref
+    features
+      deref_const : provides subprogram access Deref;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Copyable => true;
+      MemSafe_Properties::Borrow_Counted => true;
+      MemSafe_Properties::Co_Await_Prohibited => true;
+      MemSafe_Properties::Slice_Id => 1;
+  end Ref;
+
+  -- MutRef<T>: exclusive, non-copyable, [[nodiscard]]; no hold across co_await.
+  data MutRef
+    features
+      deref_mut : provides subprogram access Deref;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Copyable => false;
+      MemSafe_Properties::Borrow_Counted => true;
+      MemSafe_Properties::Co_Await_Prohibited => true;
+      MemSafe_Properties::Slice_Id => 1;
+  end MutRef;
+
+  -- Owner<T>: move-only RAII owner; noexcept move for std::vector reallocation.
+  data Owner
+    features
+      borrow     : provides subprogram access Borrow;
+      borrow_mut : provides subprogram access Borrow_Mut;
+      has_value  : provides subprogram access Has_Value;
+      deref      : provides subprogram access Deref;
+    properties
+      MemSafe_Properties::Move_Noexcept => true;
+      MemSafe_Properties::Copyable => false;
+      MemSafe_Properties::Owns_Heap_Allocation => true;
+      MemSafe_Properties::Borrow_Counted => true;
+      MemSafe_Properties::Slice_Id => 1;
+  end Owner;
+
+  data implementation Owner.impl
+    subcomponents
+      payload      : data Element;                 -- heap-allocated T
+      borrow_count : data Base_Types::Integer;     -- immutable/mutable borrow tally
+    properties
+      MemSafe_Properties::Move_Noexcept => true;
+  end Owner.impl;
+
+  ----------------------------------------------------------------------------
+  -- THREAD-SAFE OWNERSHIP VARIANTS (Slice 4)
+  ----------------------------------------------------------------------------
+
+  data SyncOwner
+    features
+      borrow     : provides subprogram access Borrow_Sync;
+      borrow_mut : provides subprogram access Borrow_Mut_Sync;
+      has_value  : provides subprogram access Has_Value;
+      deref      : provides subprogram access Deref;
+    properties
+      MemSafe_Properties::Move_Noexcept => true;
+      MemSafe_Properties::Copyable => false;
+      MemSafe_Properties::Owns_Heap_Allocation => true;
+      MemSafe_Properties::Borrow_Counted => true;
+      MemSafe_Properties::Thread_Safe => true;
+      MemSafe_Properties::Synchronization_Protocol => Atomic_Refcount;
+      MemSafe_Properties::Slice_Id => 4;
+  end SyncOwner;
+
+  data implementation SyncOwner.impl
+    subcomponents
+      payload      : data Element;
+      borrow_count : data Base_Types::Unsigned_32;  -- atomic counter
+    properties
+      MemSafe_Properties::Move_Noexcept => true;
+      MemSafe_Properties::Synchronization_Protocol => Atomic_Refcount;
+  end SyncOwner.impl;
+
+  data SyncRef
+    features
+      deref_const : provides subprogram access Deref;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Copyable => true;
+      MemSafe_Properties::Borrow_Counted => true;
+      MemSafe_Properties::Thread_Safe => true;
+      MemSafe_Properties::Co_Await_Prohibited => true;
+      MemSafe_Properties::Slice_Id => 4;
+  end SyncRef;
+
+  data SyncMutRef
+    features
+      deref_mut : provides subprogram access Deref;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Copyable => false;
+      MemSafe_Properties::Borrow_Counted => true;
+      MemSafe_Properties::Thread_Safe => true;
+      MemSafe_Properties::Co_Await_Prohibited => true;
+      MemSafe_Properties::Slice_Id => 4;
+  end SyncMutRef;
+
+  ----------------------------------------------------------------------------
+  -- HANDLE / SLOT / SLOTMAP (Slice 2)
+  ----------------------------------------------------------------------------
+
+  -- Slot<T>: payload + per-instance atomic generation counter.
+  data Slot
+    features
+      bump_generation : provides subprogram access Increment_Generation;
+    properties
+      MemSafe_Properties::Atomic_Generation => true;
+      MemSafe_Properties::Generation_Checked => true;
+      MemSafe_Properties::Synchronization_Protocol => Atomic_Refcount;
+      MemSafe_Properties::Slice_Id => 2;
+  end Slot;
+
+  data implementation Slot.impl
+    subcomponents
+      value      : data Element;
+      generation : data Base_Types::Unsigned_32;   -- std::atomic<uint32_t>
+    properties
+      MemSafe_Properties::Atomic_Generation => true;
+  end Slot.impl;
+
+  -- Handle<T>: index + remembered generation; deref verifies the match.
+  data Handle
+    features
+      deref    : provides subprogram access Deref_Handle;
+      is_valid : provides subprogram access Is_Valid;
+    properties
+      MemSafe_Properties::Nodiscard => true;
+      MemSafe_Properties::Generation_Checked => true;
+      MemSafe_Properties::Slice_Id => 2;
+  end Handle;
+
+  data implementation Handle.impl
+    subcomponents
+      index                 : data Base_Types::Unsigned_32;
+      remembered_generation : data Base_Types::Unsigned_32;
+  end Handle.impl;
+
+  -- SlotMap<T>: lock-free, bounded; Treiber-stack free list, per-slot generations.
+  data SlotMap
+    features
+      allocate   : provides subprogram access Allocate;
+      deallocate : provides subprogram access Deallocate;
+      get        : provides subprogram access Get_Slot;
+      capacity   : provides subprogram access Capacity;
+      size       : provides subprogram access Size;
+    properties
+      MemSafe_Properties::Lock_Free => true;
+      MemSafe_Properties::Bounded_Capacity => true;
+      MemSafe_Properties::Atomic_Generation => true;
+      MemSafe_Properties::Generation_Checked => true;
+      MemSafe_Properties::Synchronization_Protocol => Treiber_Stack;
+      MemSafe_Properties::Slot_Capacity => 64;
+      MemSafe_Properties::Slice_Id => 2;
+  end SlotMap;
+
+  data implementation SlotMap.impl
+    subcomponents
+      slots          : data Slot [64];                 -- fixed-capacity array
+      free_list_head : data Base_Types::Unsigned_64;   -- packed (head index, ABA)
+    properties
+      MemSafe_Properties::Synchronization_Protocol => Treiber_Stack;
+  end SlotMap.impl;
+
+  ----------------------------------------------------------------------------
+  -- SCOPE (Slice 3)
+  ----------------------------------------------------------------------------
+
+  -- Scope: untyped RAII arena; v1 create() returns a raw T* (sanitizer-only UAF).
+  data Scope
+    features
+      create : provides subprogram access Create_In_Scope;
+    properties
+      MemSafe_Properties::RAII_Scoped => true;
+      MemSafe_Properties::Slice_Id => 3;
+  end Scope;
+
+  data implementation Scope.impl
+    subcomponents
+      arena : data Element [64];   -- lifetime-bounded storage freed on scope exit
+  end Scope.impl;
+
+  ----------------------------------------------------------------------------
+  -- CONCURRENCY TYPES (Slice 5)
+  ----------------------------------------------------------------------------
+
+  -- Arc<T>: atomically reference-counted shared owner.
+  data Arc
+    features
+      deref : provides subprogram access Deref;
+    properties
+      MemSafe_Properties::Thread_Safe => true;
+      MemSafe_Properties::Borrow_Counted => true;
+      MemSafe_Properties::Synchronization_Protocol => Atomic_Refcount;
+      MemSafe_Properties::Slice_Id => 5;
+  end Arc;
+
+  data implementation Arc.impl
+    subcomponents
+      payload   : data Element;
+      ref_count : data Base_Types::Unsigned_64;   -- atomic strong count
+    properties
+      MemSafe_Properties::Synchronization_Protocol => Atomic_Refcount;
+  end Arc.impl;
+
+  -- Mutex<T>: wraps T; lock() yields a MutRef<T>.
+  data Mutex
+    features
+      lock : provides subprogram access Lock;
+    properties
+      MemSafe_Properties::Thread_Safe => true;
+      MemSafe_Properties::Synchronization_Protocol => Mutex_Guarded;
+      MemSafe_Properties::Slice_Id => 5;
+  end Mutex;
+
+  data implementation Mutex.impl
+    subcomponents
+      payload : data Element;
+    properties
+      MemSafe_Properties::Synchronization_Protocol => Mutex_Guarded;
+  end Mutex.impl;
+
+  ----------------------------------------------------------------------------
+  -- VERTICAL SLICES (roadmap as abstract components)
+  --   Slice 0 is the foundational gate; slices 1,2,4,6,7 declare a hard
+  --   compile-time dependency on it (per F0 R3.RESOLUTION.Q8).
+  ----------------------------------------------------------------------------
+
+  abstract Slice_Violation_Backbone
+    features
+      violation_api : provides subprogram access On_Violation;
+      backend_api   : provides subprogram access Backend_Detect;
+    properties
+      MemSafe_Properties::Slice_Id => 0;
+      MemSafe_Properties::Violation_Policy => Abort;
+  end Slice_Violation_Backbone;
+
+  abstract Slice_Owner_Ref
+    features
+      needs_violation : requires subprogram access On_Violation;
+    properties
+      MemSafe_Properties::Slice_Id => 1;
+  end Slice_Owner_Ref;
+
+  abstract Slice_Handle_Slot
+    features
+      needs_violation : requires subprogram access On_Violation;
+    properties
+      MemSafe_Properties::Slice_Id => 2;
+  end Slice_Handle_Slot;
+
+  abstract Slice_Scope
+    properties
+      MemSafe_Properties::Slice_Id => 3;
+      MemSafe_Properties::RAII_Scoped => true;
+  end Slice_Scope;
+
+  abstract Slice_Sync
+    features
+      needs_violation : requires subprogram access On_Violation;
+    properties
+      MemSafe_Properties::Slice_Id => 4;
+      MemSafe_Properties::Thread_Safe => true;
+  end Slice_Sync;
+
+  abstract Slice_Arc_Mutex
+    properties
+      MemSafe_Properties::Slice_Id => 5;
+      MemSafe_Properties::Thread_Safe => true;
+  end Slice_Arc_Mutex;
+
+  abstract Slice_Advanced_Diag
+    features
+      needs_violation : requires subprogram access On_Violation;
+    properties
+      MemSafe_Properties::Slice_Id => 6;
+  end Slice_Advanced_Diag;
+
+  abstract Slice_Vendor_Backends
+    features
+      needs_backend : requires subprogram access Backend_Detect;
+    properties
+      MemSafe_Properties::Slice_Id => 7;
+  end Slice_Vendor_Backends;
+
+  abstract Slice_Cxx17_Compat
+    properties
+      MemSafe_Properties::Slice_Id => 8;
+      MemSafe_Properties::Cxx_Standard => Cxx17;
+  end Slice_Cxx17_Compat;
+
+  abstract Slice_Tooling
+    properties
+      MemSafe_Properties::Slice_Id => 9;
+  end Slice_Tooling;
+
+  ----------------------------------------------------------------------------
+  -- THE LIBRARY (header-only) as a system; slice composition + dependencies.
+  -- MEMSAFE_RELEASE_CHECKS modeled as modes.
+  ----------------------------------------------------------------------------
+
+  system Memory_Safe_Library
+    properties
+      MemSafe_Properties::Header_Only => true;
+      MemSafe_Properties::Cxx_Standard => Cxx20;
+      MemSafe_Properties::Violation_Policy => Abort;   -- MEMSAFE_VIOLATION_ABORT
+      MemSafe_Properties::Backend => No_Backend;
+  end Memory_Safe_Library;
+
+  system implementation Memory_Safe_Library.impl
+    subcomponents
+      slice0 : abstract Slice_Violation_Backbone;
+      slice1 : abstract Slice_Owner_Ref;
+      slice2 : abstract Slice_Handle_Slot;
+      slice3 : abstract Slice_Scope;
+      slice4 : abstract Slice_Sync;
+      slice5 : abstract Slice_Arc_Mutex;
+      slice6 : abstract Slice_Advanced_Diag;
+      slice7 : abstract Slice_Vendor_Backends;
+      slice8 : abstract Slice_Cxx17_Compat;
+      slice9 : abstract Slice_Tooling;
+    connections
+      -- Slice 0 supplies the violation type + backend macros to its dependents.
+      dep1 : subprogram access slice0.violation_api -> slice1.needs_violation;
+      dep2 : subprogram access slice0.violation_api -> slice2.needs_violation;
+      dep4 : subprogram access slice0.violation_api -> slice4.needs_violation;
+      dep6 : subprogram access slice0.violation_api -> slice6.needs_violation;
+      dep7 : subprogram access slice0.backend_api   -> slice7.needs_backend;
+    modes
+      Release_NoChecks : initial mode;   -- MEMSAFE_RELEASE_CHECKS = 0
+      Debug_Checks     : mode;           -- MEMSAFE_RELEASE_CHECKS = 1
+    properties
+      MemSafe_Properties::Release_Checks => false in modes (Release_NoChecks);
+      MemSafe_Properties::Release_Checks => true  in modes (Debug_Checks);
+  end Memory_Safe_Library.impl;
+
+  ----------------------------------------------------------------------------
+  -- DEPLOYMENT EXAMPLE (test-plan concurrency scenario)
+  --   Two threads share an Arc<T>; mirrors "SyncOwner across threads" / "Mutex"
+  --   cases. Relacy exhausts <= 2-thread interleavings in the concurrency lane.
+  ----------------------------------------------------------------------------
+
+  processor Host_CPU
+    -- Multicore execution platform.
+  end Host_CPU;
+
+  memory Heap
+    -- Backing store for owned allocations and the shared Arc payload.
+  end Heap;
+
+  virtual bus Atomic_Sync
+    -- Atomic / memory-ordering protocol underlying the Sync* and Arc types.
+    properties
+      MemSafe_Properties::Synchronization_Protocol => Atomic_Refcount;
+  end Atomic_Sync;
+
+  thread Reader
+    features
+      shared_in : requires data access Arc;
+    properties
+      Dispatch_Protocol => Aperiodic;
+      MemSafe_Properties::Thread_Safe => true;
+  end Reader;
+
+  thread Writer
+    features
+      shared_in : requires data access Arc;
+    properties
+      Dispatch_Protocol => Aperiodic;
+      MemSafe_Properties::Thread_Safe => true;
+  end Writer;
+
+  process Sharing
+  end Sharing;
+
+  process implementation Sharing.impl
+    subcomponents
+      reader : thread Reader;
+      writer : thread Writer;
+      shared : data Arc.impl;       -- shared, atomically reference-counted
+    connections
+      rc : data access shared -> reader.shared_in;
+      wc : data access shared -> writer.shared_in;
+  end Sharing.impl;
+
+  system Concurrent_Demo
+  end Concurrent_Demo;
+
+  system implementation Concurrent_Demo.impl
+    subcomponents
+      app  : process Sharing.impl;
+      cpu  : processor Host_CPU;
+      ram  : memory Heap;
+      sync : virtual bus Atomic_Sync;
+    properties
+      Actual_Processor_Binding => (reference (cpu)) applies to app;
+      Actual_Memory_Binding    => (reference (ram)) applies to app.shared;
+  end Concurrent_Demo.impl;
+
+end MemSafe;

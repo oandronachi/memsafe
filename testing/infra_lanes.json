@@ -1,0 +1,208 @@
+{
+  "_header": {
+    "purpose": "Code-side lane definitions consumed by tools/run_tests.py. Work package CPP_MEMSAFE-0920-TEST performs the terminal lane-wiring audit without changing the generic tools.",
+    "work_package": "CPP_MEMSAFE-0920-TEST",
+    "key_invariants": [
+      "Each test translation unit selects its own MEMSAFE_ON_VIOLATION policy via #define; lanes never set a global violation policy.",
+      "The default list remains the portable F4 baseline: debug, release, asan-ubsan, and cxx17. The runner may drop sanitizer lanes automatically on Windows/MSVC local backends.",
+      "Property, fuzz, concurrency, and performance artifacts are wired through lane-scoped source globs so they can be selected as declared presets without editing tools/.",
+      "Environment-gated TSan, MSan, HWASan, Valgrind, Clang lifetime, CHERI, and Rusty-C++ backend lanes remain preset-only because their toolchains or targets are not portable baseline prerequisites."
+    ]
+  },
+  "_comment": "Lane definitions for THIS code base, consumed by tools/run_tests.py. The tool itself is generic; all library-specific build knobs live here. Each test selects its own violation policy via #define, so no policy is set here.",
+  "_keys": "Per lane: build_type, std, sanitize, defines, image, sources.{tests,examples,compile_fail}, exclude, test_launcher. sources/exclude globs are relative to testing/ unless absolute. image accepts a tag or digest pin; summary.json reports image_ref. test_launcher is prepended to runtime tests only.",
+  "_terminal_gate": "CPP_MEMSAFE-0920-TEST is terminal in the TEST DAG, so this file is validated only after every leaf test artifact exists. The lane file stays code-side: optional category lanes discover the finalized subdirectories, while the no-preset command keeps the dependency-free portable baseline required by F4.",
+  "_source_comment_DEC_0003": "Spec ambiguity: the resolved rework pointer names artifact 1st attempt/, but this package's declared destination and drop-in contract allow only the code-side testing/infra_lanes.json and forbid tools/ edits. DEC-0003 records reviewer consensus to accept the candidate lane wiring as correct as-is; this file therefore remains the sole TEST artifact and preserves optional category/backend lanes as preset-only while the no-preset baseline stays debug, release, asan-ubsan, and cxx17.",
+  "_rework_note": "The previous attempt promoted optional category lanes into default. The F4 contract defines those lanes as declared presets rather than unconditional portable baseline lanes, so this rework restores the F4 default and keeps the category/backend wiring explicit.",
+  "lanes": {
+    "debug": {
+      "build_type": "Debug",
+      "std": "20",
+      "description": "Debug checks-on baseline lane for top-level runtime tests, examples, and compile-fail tests discovered by the generic F4 globs."
+    },
+    "release": {
+      "build_type": "Release",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_RELEASE_CHECKS=0"
+      ],
+      "description": "Release no-checks baseline lane for the F3 Release_NoChecks mode."
+    },
+    "asan-ubsan": {
+      "build_type": "Debug",
+      "std": "20",
+      "sanitize": "address,undefined",
+      "description": "Portable ASan+UBSan baseline lane for GNU/Clang backends. tools/run_tests.py drops sanitizer lanes automatically for Windows/MSVC local runs."
+    },
+    "cxx17": {
+      "build_type": "Debug",
+      "std": "17",
+      "defines": [
+        "MEMSAFE_CXX17_COMPAT=1"
+      ],
+      "description": "C++17 compatibility baseline lane required by the F2 Test Environment."
+    },
+    "property": {
+      "build_type": "Debug",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_ENABLE_PROPERTY_TESTS=1"
+      ],
+      "sources": {
+        "tests": [
+          "tests/*.cpp",
+          "tests/property/*.cpp"
+        ],
+        "examples": [
+          "../examples/*.cpp"
+        ],
+        "compile_fail": [
+          "tests/compile_fail/*.cpp"
+        ]
+      },
+      "description": "Preset-only property-test lane. Includes testing/tests/property/*.cpp for the finalized Owner, Handle, SlotMap, Scope, Arc, and Mutex property tests.",
+      "optional": true
+    },
+    "fuzz": {
+      "build_type": "Debug",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_ENABLE_FUZZ_TESTS=1"
+      ],
+      "sources": {
+        "tests": [
+          "tests/*.cpp",
+          "tests/fuzz/*.cpp"
+        ],
+        "examples": [
+          "../examples/*.cpp"
+        ],
+        "compile_fail": [
+          "tests/compile_fail/*.cpp"
+        ]
+      },
+      "description": "Preset-only deterministic fuzz replay lane. Includes testing/tests/fuzz/*.cpp while leaving true libFuzzer integration as optional future infrastructure.",
+      "optional": true
+    },
+    "concurrency": {
+      "build_type": "Debug",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_ENABLE_CONCURRENCY_TESTS=1"
+      ],
+      "sources": {
+        "tests": [
+          "tests/*.cpp",
+          "tests/concurrency/*.cpp"
+        ],
+        "examples": [
+          "../examples/*.cpp"
+        ],
+        "compile_fail": [
+          "tests/compile_fail/*.cpp"
+        ]
+      },
+      "description": "Preset-only concurrency/permutation lane. Includes testing/tests/concurrency/*.cpp and the vendored Relacy headers consumed by those tests.",
+      "optional": true
+    },
+    "perf": {
+      "build_type": "Release",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_RELEASE_CHECKS=0",
+        "MEMSAFE_ENABLE_PERF_TESTS=1"
+      ],
+      "sources": {
+        "tests": [
+          "tests/*.cpp",
+          "tests/perf/*.cpp"
+        ],
+        "examples": [
+          "../examples/*.cpp"
+        ],
+        "compile_fail": [
+          "tests/compile_fail/*.cpp"
+        ]
+      },
+      "description": "Preset-only release/no-checks performance lane. Includes testing/tests/perf/*.cpp so the <=5 percent chrono benchmark gate can be selected without a tool edit.",
+      "optional": true
+    },
+    "tsan": {
+      "build_type": "Debug",
+      "std": "20",
+      "sanitize": "thread",
+      "description": "ThreadSanitizer lane for GCC/Clang platforms that support it. Environment-gated and preset-only.",
+      "optional": true
+    },
+    "msan": {
+      "build_type": "Debug",
+      "std": "20",
+      "sanitize": "memory",
+      "description": "MemorySanitizer lane for Clang Linux toolchains that support it. Environment-gated and preset-only.",
+      "optional": true
+    },
+    "hwasan": {
+      "build_type": "Debug",
+      "std": "20",
+      "sanitize": "hwaddress",
+      "description": "HWAddressSanitizer lane for AArch64/Clang hosts that support it. Environment-gated and preset-only.",
+      "optional": true
+    },
+    "valgrind-cxx17": {
+      "build_type": "Debug",
+      "std": "17",
+      "defines": [
+        "MEMSAFE_CXX17_COMPAT=1"
+      ],
+      "test_launcher": [
+        "valgrind",
+        "--error-exitcode=125",
+        "--leak-check=full"
+      ],
+      "description": "Valgrind memcheck lane for the C++17 subset on Linux hosts with valgrind installed. Environment-gated and preset-only.",
+      "optional": true
+    },
+    "clang-backend": {
+      "build_type": "Debug",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_BACKEND_CLANG=1"
+      ],
+      "description": "Clang lifetimebound/coro_lifetimebound backend lane for the co_await prohibition (CPP_MEMSAFE-0710). Preset-only: run where Clang lifetime diagnostics are available. Excludes the Slice-0 backend-identity test, whose native compiler-family static_assert is incompatible with a forced vendor backend on non-Clang smoke hosts.",
+      "optional": true,
+      "exclude": [
+        "tests/test_backend_macros.cpp"
+      ]
+    },
+    "cheri": {
+      "build_type": "Debug",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_BACKEND_CHERI=1"
+      ],
+      "description": "CHERI capability backend lane (CPP_MEMSAFE-0720). Preset-only and environment-gated: builds/runs on CHERI-capable toolchains; testing/tests/test_backend_cheri.cpp skips elsewhere. Excludes the Slice-0 backend-identity test, whose native compiler-family static_assert is incompatible with a forced vendor backend.",
+      "optional": true,
+      "exclude": [
+        "tests/test_backend_macros.cpp"
+      ]
+    },
+    "rusty-cpp": {
+      "build_type": "Debug",
+      "std": "20",
+      "defines": [
+        "MEMSAFE_BACKEND_RUSTY_CPP=1"
+      ],
+      "description": "Rusty-C++ checker backend lane (CPP_MEMSAFE-0720). Preset-only and environment-gated. Excludes the Slice-0 backend-identity test, whose native compiler-family static_assert is incompatible with a forced vendor backend.",
+      "optional": true,
+      "exclude": [
+        "tests/test_backend_macros.cpp"
+      ]
+    }
+  },
+  "default": [
+    "debug",
+    "release",
+    "asan-ubsan",
+    "cxx17"
+  ]
+}
